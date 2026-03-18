@@ -5,12 +5,14 @@ import io
 
 # --- FUNCIONES DE LIMPIEZA ---
 def clean_ticket(ticket_str):
+    """Extrae solo el número de ticket (ignora # o links)."""
     if pd.isna(ticket_str): return ""
     numbers = re.findall(r'\d+', str(ticket_str))
     if numbers: return numbers[-1]
     return ticket_str
 
 def clean_monto(monto_str):
+    """Limpia los montos quitando $, puntos y espacios."""
     if pd.isna(monto_str): return ""
     return str(monto_str).replace('$', '').replace('.', '').replace(',', '').strip()
 
@@ -38,11 +40,14 @@ def procesar_saldos(df):
     return df
 
 def procesar_transferencias(df):
+    # 1. Eliminar columnas duplicadas/vacías específicas ANTES de limpiar espacios
     columnas_a_eliminar = ['Fecha', 'Monto '] 
     df = df.drop(columns=[col for col in columnas_a_eliminar if col in df.columns])
     
+    # 2. Limpiar espacios de las columnas restantes
     df.columns = df.columns.str.strip() 
     
+    # Filtros de motivos
     if 'Motivo' in df.columns:
         df = df[df['Motivo'].astype(str).str.strip() == 'Compensación Aeropuerto']
     
@@ -124,10 +129,12 @@ if st.button("Procesar y Cruzar Datos", type="primary"):
     if archivo_saldos and archivo_transf and archivos_transacciones:
         try:
             with st.spinner('Procesando datos...'):
+                # Lectura
                 df_saldos = pd.read_excel(archivo_saldos)
                 df_transf = pd.read_excel(archivo_transf)
                 lista_trans = [pd.read_csv(f) for f in archivos_transacciones]
                 
+                # Procesamiento
                 df_saldos = procesar_saldos(df_saldos)
                 df_transf = procesar_transferencias(df_transf)
                 df_trans = procesar_transacciones(lista_trans)
@@ -138,41 +145,49 @@ if st.button("Procesar y Cruzar Datos", type="primary"):
                     'Motivo compensación', 'Id_reserva', 'Compensación Aeropuerto'
                 ]
                 
+                # Advertencias si faltan columnas
+                faltantes_saldos = [c for c in columnas_requeridas if c not in df_saldos.columns]
+                if faltantes_saldos: st.warning(f"⚠️ A SALDOS le faltan estas columnas: {faltantes_saldos}")
+                    
                 df_saldos = df_saldos[[c for c in columnas_requeridas if c in df_saldos.columns]]
                 df_transf = df_transf[[c for c in columnas_requeridas if c in df_transf.columns]]
                 
+                # Unir saldos y transferencias
                 df_compensaciones = pd.concat([df_saldos, df_transf], ignore_index=True)
                 
                 if 'Id_reserva' not in df_compensaciones.columns or 'Id_reserva' not in df_trans.columns:
                     st.error("🚨 Error crítico: No se encontró la columna 'Id_reserva', no se puede hacer el cruce.")
                     st.stop()
                 
+                # Cruce final
                 df_final = pd.merge(df_compensaciones, df_trans, on='Id_reserva', how='inner')
                 
-                # --- NUEVA LÓGICA DE PARSEO DE FECHA Y HORA ---
+                # --- LÓGICA DE PARSEO DE FECHA Y HORA ROBUSTA ---
                 if 'Tm_start_local_at' in df_final.columns:
-                    # 1. Limpieza extrema: Reemplazamos espacios duros y forzamos un formato AM/PM estándar
+                    # Limpieza extrema de espacios duros y AM/PM
                     tm_clean = df_final['Tm_start_local_at'].astype(str)
-                    tm_clean = tm_clean.str.replace(r'\xa0', ' ', regex=True) # Elimina espacios invisibles del CSV
+                    tm_clean = tm_clean.str.replace(r'\xa0', ' ', regex=True)
                     tm_clean = tm_clean.str.replace(r'[aA]\.?\s*[mM]\.?', 'AM', regex=True)
                     tm_clean = tm_clean.str.replace(r'[pP]\.?\s*[mM]\.?', 'PM', regex=True)
                     
-                    # 2. Conversión a datetime
-                    df_final['Tm_dt'] = pd.to_datetime(tm_clean, errors='coerce', dayfirst=True)
+                    # Conversión a datetime (Con format='mixed' para casos raros sin AM/PM)
+                    try:
+                        df_final['Tm_dt'] = pd.to_datetime(tm_clean, errors='coerce', dayfirst=True, format='mixed')
+                    except ValueError:
+                        df_final['Tm_dt'] = pd.to_datetime(tm_clean, errors='coerce', dayfirst=True)
                     
-                    # 3. Fecha extraída como objeto Fecha Real (para que Excel lo identifique como tal)
+                    # Fecha como objeto real y Hora como entero puro
                     df_final['Fecha'] = df_final['Tm_dt'].dt.date
-                    
-                    # 4. Hora extraída como número entero exacto ('Int64' maneja vacíos sin usar decimales)
                     df_final['Hora'] = df_final['Tm_dt'].dt.hour.astype('Int64')
                 
+                # Ordenar columnas finales
                 columnas_finales = columnas_requeridas + ['Tm_start_local_at', 'Fecha', 'Hora']
                 df_final = df_final[[c for c in columnas_finales if c in df_final.columns]]
                 
             st.success(f"¡Cruce realizado con éxito! Encontramos {len(df_final)} coincidencias.")
             st.dataframe(df_final)
             
-            # --- EXPORTACIÓN ---
+            # --- EXPORTACIÓN A EXCEL ---
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='xlsxwriter', datetime_format='dd/mm/yyyy') as writer:
                 df_final.to_excel(writer, index=False, sheet_name='Compensaciones')
