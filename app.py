@@ -38,13 +38,9 @@ def procesar_saldos(df):
     return df
 
 def procesar_transferencias(df):
-    # 1. ELIMINAR COLUMNAS DUPLICADAS ESPECÍFICAS ANTES DE LIMPIAR ESPACIOS
-    # 'Fecha' (sin espacio) es la segunda fecha (no tiene hora).
-    # 'Monto ' (con espacio) es el primer monto (suele venir en blanco).
     columnas_a_eliminar = ['Fecha', 'Monto '] 
     df = df.drop(columns=[col for col in columnas_a_eliminar if col in df.columns])
     
-    # 2. Ahora sí limpiamos los espacios de las columnas que quedaron
     df.columns = df.columns.str.strip() 
     
     if 'Motivo' in df.columns:
@@ -55,10 +51,10 @@ def procesar_transferencias(df):
         df = df[df['Si es compensación Aeropuerto selecciona el motivo'].astype(str).str.strip().isin(motivos_validos)]
         
     renames = {
-        'Fecha': 'Datetime Compensación', # Proviene de la original ' Fecha'
+        'Fecha': 'Datetime Compensación',
         'Ticket': 'Numero',
         'Correo': 'Correo registrado en Cabify para realizar la carga',
-        'Monto': 'Monto a compensar', # Proviene de la original 'Monto' (la segunda)
+        'Monto': 'Monto a compensar',
         'Si es compensación Aeropuerto selecciona el motivo': 'Motivo compensación',
         'Link payments, link del viaje o numero reserva': 'Id_reserva'
     }
@@ -142,10 +138,6 @@ if st.button("Procesar y Cruzar Datos", type="primary"):
                     'Motivo compensación', 'Id_reserva', 'Compensación Aeropuerto'
                 ]
                 
-                # Reporte de columnas faltantes para ayudar a diagnosticar
-                faltantes_saldos = [c for c in columnas_requeridas if c not in df_saldos.columns]
-                if faltantes_saldos: st.warning(f"⚠️ A SALDOS le faltan estas columnas: {faltantes_saldos}")
-                    
                 df_saldos = df_saldos[[c for c in columnas_requeridas if c in df_saldos.columns]]
                 df_transf = df_transf[[c for c in columnas_requeridas if c in df_transf.columns]]
                 
@@ -157,12 +149,22 @@ if st.button("Procesar y Cruzar Datos", type="primary"):
                 
                 df_final = pd.merge(df_compensaciones, df_trans, on='Id_reserva', how='inner')
                 
+                # --- NUEVA LÓGICA DE PARSEO DE FECHA Y HORA ---
                 if 'Tm_start_local_at' in df_final.columns:
-                    tm_clean = df_final['Tm_start_local_at'].str.replace(r'\.\s*m\.', 'm', regex=True).str.replace(r'\s+', ' ', regex=True)
+                    # 1. Limpieza extrema: Reemplazamos espacios duros y forzamos un formato AM/PM estándar
+                    tm_clean = df_final['Tm_start_local_at'].astype(str)
+                    tm_clean = tm_clean.str.replace(r'\xa0', ' ', regex=True) # Elimina espacios invisibles del CSV
+                    tm_clean = tm_clean.str.replace(r'[aA]\.?\s*[mM]\.?', 'AM', regex=True)
+                    tm_clean = tm_clean.str.replace(r'[pP]\.?\s*[mM]\.?', 'PM', regex=True)
+                    
+                    # 2. Conversión a datetime
                     df_final['Tm_dt'] = pd.to_datetime(tm_clean, errors='coerce', dayfirst=True)
                     
-                    df_final['Fecha'] = df_final['Tm_dt'].dt.strftime('%d/%m/%Y')
-                    df_final['Hora'] = df_final['Tm_dt'].dt.hour.fillna(-1).astype(int) 
+                    # 3. Fecha extraída como objeto Fecha Real (para que Excel lo identifique como tal)
+                    df_final['Fecha'] = df_final['Tm_dt'].dt.date
+                    
+                    # 4. Hora extraída como número entero exacto ('Int64' maneja vacíos sin usar decimales)
+                    df_final['Hora'] = df_final['Tm_dt'].dt.hour.astype('Int64')
                 
                 columnas_finales = columnas_requeridas + ['Tm_start_local_at', 'Fecha', 'Hora']
                 df_final = df_final[[c for c in columnas_finales if c in df_final.columns]]
@@ -170,8 +172,9 @@ if st.button("Procesar y Cruzar Datos", type="primary"):
             st.success(f"¡Cruce realizado con éxito! Encontramos {len(df_final)} coincidencias.")
             st.dataframe(df_final)
             
+            # --- EXPORTACIÓN ---
             buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            with pd.ExcelWriter(buffer, engine='xlsxwriter', datetime_format='dd/mm/yyyy') as writer:
                 df_final.to_excel(writer, index=False, sheet_name='Compensaciones')
             
             st.download_button(
